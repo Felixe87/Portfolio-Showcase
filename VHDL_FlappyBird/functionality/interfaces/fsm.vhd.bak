@@ -1,0 +1,262 @@
+library IEEE;
+use IEEE.std_logic_1164.all;
+use IEEE.std_logic_unsigned.all;
+use IEEE.numeric_std.all;
+
+entity fsm is
+    port (
+        CLOCK_50        : in std_logic;
+        reset_btn       : in std_logic;        -- key0
+        start_btn       : in std_logic;        -- key1
+        pause_btn       : in std_logic;        -- key2
+        back_btn        : in std_logic;        -- key3 go back to start
+        mode_switch     : in std_logic;        -- sw(0) 0=training 1=game
+        hit_pipe        : in std_logic;        -- 1=hit pipe
+        hit_ground      : in std_logic;        -- 1=hit ground/top
+        passed_pipe     : in std_logic;        -- 1=passed pipe which adds to score
+        collectable     : in std_logic;        -- 1= +3 points
+       
+        game_mode       : out std_logic;       -- 0=training 1=game
+        game_active     : out std_logic;       -- 1=playing 0=not playing
+        is_paused          : out std_logic;       -- 1=paused 0=playing
+        level           : out std_logic_vector(1 downto 0);  -- "00"=L1 "01"=L2 "10"=L3
+        lives           : out std_logic_vector(1 downto 0);  -- "00"=0 "01"=1 "10"=2 "11"=3
+        score           : out std_logic_vector(9 downto 0)   -- 0 to 999
+    );
+end entity fsm;
+
+architecture behaviour of fsm is
+
+    -- all the states
+    type state_type is (
+        START,          -- title screen
+        MODE_SELECT,    -- pick training or game
+        HOLD,           -- ready to play
+        PLAYING,        -- game running
+        PAUSED,         -- game frozen
+        LIFE_LOST,      -- hit something so losing life
+        GAME_OVER       -- show score
+    );
+   
+    signal current_state : state_type := START;
+    signal next_state    : state_type := START;
+   
+    signal reset_pressed   : std_logic;
+    signal start_pressed   : std_logic;
+    signal pause_pressed   : std_logic;
+    signal back_pressed    : std_logic;
+   
+    -- game variables
+    signal lives_counter   : integer range 0 to 3 := 3;
+    signal score_counter   : integer range 0 to 999 := 0;
+    signal pipes_counter   : integer range 0 to 999 := 0;  -- changed to go up to 999
+    signal level_counter   : integer range 0 to 2 := 0;
+
+begin
+
+    -- flip buttons from low to high
+    reset_pressed <= not reset_btn;
+    start_pressed <= not start_btn;
+    pause_pressed <= not pause_btn;
+    back_pressed <= not back_btn;
+
+    -- this updates everything on each clock tick
+    process(CLOCK_50, reset_pressed)
+    begin
+        if reset_pressed = '1' then
+            -- reset everything
+            current_state <= START;
+            lives_counter <= 3;
+            score_counter <= 0;
+            pipes_counter <= 0;
+            level_counter <= 0;
+        elsif rising_edge(CLOCK_50) then
+            current_state <= next_state;
+           
+            -- add score when passing pipe
+            if current_state = PLAYING and passed_pipe = '1' then
+                if score_counter < 999 then
+                    score_counter <= score_counter + 1;
+                end if;
+               
+                -- count pipes for level ups only in GAME mode, no reset.
+                if mode_switch = '1' then
+                    if pipes_counter < 999 then
+                        pipes_counter <= pipes_counter + 1;
+                    end if;
+                end if;
+            end if;
+           
+            -- lose life when hitting pipe or ground
+            if current_state = PLAYING and (hit_pipe = '1' or hit_ground = '1') then
+                if lives_counter > 0 then
+                    lives_counter <= lives_counter - 1;
+                end if;
+            end if;
+           
+            -- set difficulty level based on pipes passed 25 pipe intervals, 3 difficulties so far
+            if mode_switch = '1' then  -- GAME mode
+                if pipes_counter >= 50 then
+                    level_counter <= 2;  
+                elsif pipes_counter >= 25 then
+                    level_counter <= 1;  
+                else
+                    level_counter <= 0;  
+                end if;
+            else
+                level_counter <= 0;  -- training mode
+            end if;
+           
+            -- collectable
+            if current_state = PLAYING and collectable = '1' then
+                if score_counter <= 996 then
+                    score_counter <= score_counter + 3;
+                else
+                    score_counter <= 999;
+                end if;
+            end if;
+        end if;
+    end process;
+   
+    -- decides which state comes next
+    process(current_state, start_pressed, pause_pressed, back_pressed, mode_switch, hit_pipe, hit_ground, lives_counter)
+    begin
+        next_state <= current_state;  -- stay where we are by default
+       
+        case current_state is
+           
+            when START =>
+                if start_pressed = '1' then
+                    next_state <= MODE_SELECT;
+                end if;
+               
+            when MODE_SELECT =>
+                next_state <= HOLD;  -- just pass through to HOLD
+               
+            when HOLD =>
+                if start_pressed = '1' then
+                    next_state <= PLAYING;
+                elsif back_pressed = '1' then
+                    next_state <= START;  -- go back to change mode
+                end if;
+               
+            when PLAYING =>
+                if pause_pressed = '1' then
+                    next_state <= PAUSED;
+                elsif (hit_pipe = '1' or hit_ground = '1') then
+                    next_state <= LIFE_LOST;
+                end if;
+               
+            when PAUSED =>
+                if pause_pressed = '1' then
+                    next_state <= PLAYING;
+                end if;
+               
+            when LIFE_LOST =>
+                if lives_counter = 0 then
+                    next_state <= GAME_OVER;
+                else
+                    next_state <= PLAYING;  
+                end if;
+               
+            when GAME_OVER =>
+                -- any button goes back to HOLD
+                if start_pressed = '1' or pause_pressed = '1' or back_pressed = '1' then
+                    next_state <= HOLD;
+                end if;
+               
+            when others =>
+                next_state <= START;
+               
+        end case;
+    end process;
+   
+    -- sets the outputs based on current state
+    process(current_state, mode_switch, level_counter, lives_counter, score_counter)
+    begin
+        -- default values
+        game_mode <= '0';
+        game_active <= '0';
+        is_paused <= '0';
+        level <= "00";
+        lives <= "11";
+        score <= (others => '0');
+       
+        case current_state is
+            when START =>
+                game_mode <= '0';
+                game_active <= '0';
+               
+            when MODE_SELECT =>
+                if mode_switch = '0' then
+                    game_mode <= '0';  -- training
+                else
+                    game_mode <= '1';  -- game
+                end if;
+               
+            when HOLD =>
+                if mode_switch = '0' then
+                    game_mode <= '0';
+                else
+                    game_mode <= '1';
+                end if;
+                game_active <= '0';
+               
+            when PLAYING =>
+                game_active <= '1';
+                is_paused <= '0';
+                if mode_switch = '0' then
+                    game_mode <= '0';
+                else
+                    game_mode <= '1';
+                end if;
+               
+                -- set difficulty
+                if level_counter = 0 then
+                    level <= "00";  
+                elsif level_counter = 1 then
+                    level <= "01";  
+                else
+                    level <= "10";  
+                end if;
+               
+                lives <= std_logic_vector(to_unsigned(lives_counter, 2));
+                score <= std_logic_vector(to_unsigned(score_counter, 10));
+               
+            when PAUSED =>
+                game_active <= '1';
+                is_paused <= '1';
+                if mode_switch = '0' then
+                    game_mode <= '0';
+                else
+                    game_mode <= '1';
+                end if;
+                level <= std_logic_vector(to_unsigned(level_counter, 2));
+                lives <= std_logic_vector(to_unsigned(lives_counter, 2));
+                score <= std_logic_vector(to_unsigned(score_counter, 10));
+               
+            when LIFE_LOST =>
+                game_active <= '1';
+                if mode_switch = '0' then
+                    game_mode <= '0';
+                else
+                    game_mode <= '1';
+                end if;
+                level <= std_logic_vector(to_unsigned(level_counter, 2));
+                lives <= std_logic_vector(to_unsigned(lives_counter, 2));
+                score <= std_logic_vector(to_unsigned(score_counter, 10));
+               
+            when GAME_OVER =>
+                game_active <= '0';
+                if mode_switch = '0' then
+                    game_mode <= '0';
+                else
+                    game_mode <= '1';
+                end if;
+                lives <= std_logic_vector(to_unsigned(lives_counter, 2));
+                score <= std_logic_vector(to_unsigned(score_counter, 10));
+               
+        end case;
+    end process;
+
+end architecture behaviour;
